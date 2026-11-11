@@ -323,19 +323,14 @@ public:
     }
 
     int shmid() const { return shmid_; }
-    bool dismissed() const { return dismissed_; }
+    bool windowOpen() const { return windowOpen_; }
 
     void update(const Options& opt)
     {
-        if (dismissed_)
-            return;
-
         if (windowOpen_ && cv::getWindowProperty(title_, cv::WND_PROP_AUTOSIZE) < 0) {
-            // User closed this window: keep it hidden until the segment is recreated.
+            // Closed by the user: it reopens with the next new frame.
             windowOpen_ = false;
-            dismissed_ = true;
             std::fprintf(stderr, "[%s] window closed by user\n", hexKey(shm_.key).c_str());
-            return;
         }
 
         Candidate c;
@@ -405,7 +400,6 @@ private:
     std::string title_;
     int shmid_ = -1;
     bool windowOpen_ = false;
-    bool dismissed_ = false;
     bool haveFrame_ = false;
     uint32_t lastFrameNo_ = 0;
     std::vector<uint8_t> msg_;
@@ -512,7 +506,7 @@ int main(int argc, char** argv)
         bool anyWindow = false;
         for (auto& kv : viewers) {
             kv.second->update(opt);
-            anyWindow = anyWindow || !kv.second->dismissed();
+            anyWindow = anyWindow || kv.second->windowOpen();
         }
 
         // waitKey also pumps GUI events (needed for destroyWindow to take effect).

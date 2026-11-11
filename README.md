@@ -28,7 +28,7 @@ cmake --build build
 ```
 
 Keys: `q`/`ESC` quit, `f` toggle vertical flip, `s` save current frames as PNG.
-A window closed by hand stays hidden until its segment is recreated.
+A window closed by hand reopens with the next new frame; use `q` to quit.
 
 ## VTD side
 
