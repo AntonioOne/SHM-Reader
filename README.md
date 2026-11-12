@@ -26,9 +26,20 @@ cmake --build build
 ./build/ShmRgbViewer 0x08130 0x08142       # only these keys
 ./build/ShmRgbViewer --range 0x8100 0x82ff # custom key range
 ./build/ShmRgbViewer --scale 0.5 --no-flip
+./build/ShmRgbViewer --save-dir ~/captures  # where the Save button writes PNGs
 ```
 
-Keys: `q`/`ESC` quit, `f` toggle vertical flip, `s` save current frames as PNG.
+Keys: `q`/`ESC` quit, `f` toggle vertical flip, `s` save the current frame of every window.
+
+### Saving images
+
+Every window has a **Save** button in its bottom-right corner (kept away from the top-right, where
+ShmFrameTagger draws its counter). Clicking it saves that window's current frame:
+
+- full resolution, as displayed (flipped upright), **without** the info text and the button;
+- file name `shm_<key>_frame<VTD frame>_<YYYYmmdd_HHMMSS_mmm>.png`, so repeated clicks never overwrite;
+- written to `--save-dir <dir>` (default: the current directory; created if missing);
+- the path is printed in the terminal and "Saved ..." is shown next to the button for 2 s.
 
 ### Starting and stopping
 

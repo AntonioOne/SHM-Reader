@@ -9,11 +9,13 @@
 //
 // Usage: ShmRgbViewer [--range <lo> <hi>] [--no-flip] [--scale <factor>] [key ...]
 //        Without explicit keys, all keys in the range are monitored.
-// Keys:  q/ESC quit, f toggle vertical flip, s save current frames as PNG
+// Click "Save" (bottom-right of a window) to save that frame; keys: q/ESC quit, f toggle vertical
+// flip, s save the current frame of every window.
 // Only one instance runs at a time (starting again stops the running one); --stop stops it.
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
+#include <sys/stat.h>
 
 #include <opencv2/core.hpp>
 #include <opencv2/highgui.hpp>
@@ -21,12 +23,14 @@
 #include <opencv2/imgproc.hpp>
 
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <fstream>
 #include <map>
 #include <memory>
@@ -295,11 +299,20 @@ std::string hexKey(key_t key)
 struct Options {
     bool flip = true;
     double displayScale = 1.0;
+    std::string saveDir = ".";
 };
+
+// Clickable "Save" button drawn in the bottom-right corner of every window.
+constexpr int kButtonW = 90;
+constexpr int kButtonH = 30;
+constexpr int kButtonMargin = 10;
 
 class Viewer {
 public:
-    Viewer(key_t key, int shmid) : title_("SHM " + hexKey(key)), shmid_(shmid) { shm_.key = key; }
+    Viewer(key_t key, int shmid, const Options& opt) : title_("SHM " + hexKey(key)), shmid_(shmid), opt_(opt)
+    {
+        shm_.key = key;
+    }
     ~Viewer() { close(); }
 
     bool attach()
@@ -357,6 +370,7 @@ public:
 
         if (opt.flip)
             cv::flip(bgr, bgr, 0);
+        clean_ = bgr.clone(); // full resolution, no overlays: what the Save button writes
         if (opt.displayScale > 0.0 && opt.displayScale != 1.0)
             cv::resize(bgr, bgr, cv::Size(), opt.displayScale, opt.displayScale, cv::INTER_AREA);
 
@@ -380,32 +394,111 @@ public:
 
         if (!windowOpen_) {
             cv::namedWindow(title_, cv::WINDOW_AUTOSIZE);
+            cv::setMouseCallback(title_, &Viewer::onMouse, this);
             windowOpen_ = true;
             std::fprintf(stderr, "[%s] window opened (%ux%u %s)\n", hexKey(shm_.key).c_str(),
                          unsigned(img->width), unsigned(img->height), pixelFormatName(img->pixelFormat));
         }
-        frame_ = bgr;
-        cv::imshow(title_, frame_);
+        display_ = bgr;
+        show();
     }
 
-    void save() const
+    // Saves the current frame at full resolution without overlays. Returns false if nothing to save.
+    bool save()
     {
-        if (!windowOpen_ || frame_.empty())
-            return;
-        const std::string name = "shm_" + hexKey(shm_.key) + "_frame_" + std::to_string(lastFrameNo_) + ".png";
-        cv::imwrite(name, frame_);
-        std::fprintf(stderr, "Saved %s\n", name.c_str());
+        if (!windowOpen_ || clean_.empty())
+            return false;
+        if (mkdir(opt_.saveDir.c_str(), 0775) != 0 && errno != EEXIST) {
+            std::fprintf(stderr, "Cannot create %s: %s\n", opt_.saveDir.c_str(), std::strerror(errno));
+            return false;
+        }
+
+        const auto wall = std::chrono::system_clock::now();
+        const std::time_t secs = std::chrono::system_clock::to_time_t(wall);
+        const int ms = int(std::chrono::duration_cast<std::chrono::milliseconds>(wall.time_since_epoch()).count() % 1000);
+        std::tm tm{};
+        localtime_r(&secs, &tm);
+        char stamp[32];
+        std::strftime(stamp, sizeof(stamp), "%Y%m%d_%H%M%S", &tm);
+        char name[128];
+        std::snprintf(name, sizeof(name), "shm_%s_frame%u_%s_%03d.png", hexKey(shm_.key).c_str(), lastFrameNo_, stamp, ms);
+        const std::string path = opt_.saveDir + "/" + name;
+
+        bool ok = false;
+        try {
+            ok = cv::imwrite(path, clean_);
+        } catch (const cv::Exception& e) {
+            std::fprintf(stderr, "Saving %s failed: %s\n", path.c_str(), e.what());
+        }
+        if (ok)
+            std::fprintf(stderr, "Saved %s\n", path.c_str());
+        else
+            std::fprintf(stderr, "Saving %s failed\n", path.c_str());
+        feedback_ = ok ? std::string("Saved ") + name : std::string("Save failed");
+        feedbackUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(2);
+        show();
+        return ok;
+    }
+
+    // Removes the save feedback once it has expired (also when no new frames arrive).
+    void refreshOverlay()
+    {
+        if (!feedback_.empty() && std::chrono::steady_clock::now() >= feedbackUntil_) {
+            feedback_.clear();
+            show();
+        }
     }
 
 private:
+    cv::Rect buttonRect() const
+    {
+        return cv::Rect(display_.cols - kButtonW - kButtonMargin, display_.rows - kButtonH - kButtonMargin, kButtonW,
+                        kButtonH);
+    }
+
+    // Shows the last frame with the Save button (and the save feedback, if any).
+    void show()
+    {
+        if (!windowOpen_ || display_.empty())
+            return;
+        cv::Mat canvas = display_.clone();
+        const cv::Rect r = buttonRect();
+        if (r.x >= 0 && r.y >= 0) {
+            cv::rectangle(canvas, r, cv::Scalar(60, 60, 60), cv::FILLED);
+            cv::rectangle(canvas, r, cv::Scalar(230, 230, 230), 1);
+            int base = 0;
+            const cv::Size ts = cv::getTextSize("Save", cv::FONT_HERSHEY_SIMPLEX, 0.6, 1, &base);
+            cv::putText(canvas, "Save", cv::Point(r.x + (r.width - ts.width) / 2, r.y + (r.height + ts.height) / 2),
+                        cv::FONT_HERSHEY_SIMPLEX, 0.6, cv::Scalar(255, 255, 255), 1, cv::LINE_AA);
+            if (!feedback_.empty()) {
+                const cv::Size fs = cv::getTextSize(feedback_, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &base);
+                const cv::Point p(std::max(4, r.x - fs.width - 10), r.y + (r.height + fs.height) / 2);
+                cv::putText(canvas, feedback_, p, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 3, cv::LINE_AA);
+                cv::putText(canvas, feedback_, p, cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 255, 255), 1, cv::LINE_AA);
+            }
+        }
+        cv::imshow(title_, canvas);
+    }
+
+    static void onMouse(int event, int x, int y, int, void* self)
+    {
+        auto* v = static_cast<Viewer*>(self);
+        if (event == cv::EVENT_LBUTTONDOWN && v->buttonRect().contains(cv::Point(x, y)))
+            v->save();
+    }
+
     ShmSegment shm_;
     std::string title_;
     int shmid_ = -1;
+    const Options& opt_;
     bool windowOpen_ = false;
     bool haveFrame_ = false;
     uint32_t lastFrameNo_ = 0;
     std::vector<uint8_t> msg_;
-    cv::Mat frame_;
+    cv::Mat clean_;   // last frame, full resolution, as displayed (flipped), without overlays
+    cv::Mat display_; // last frame scaled for display, with the info text
+    std::string feedback_;
+    std::chrono::steady_clock::time_point feedbackUntil_;
     std::string lastErr_;
     std::chrono::steady_clock::time_point fpsStart_ = std::chrono::steady_clock::now();
     int fpsCount_ = 0;
@@ -415,13 +508,16 @@ private:
 void usage(const char* prog)
 {
     std::fprintf(stderr,
-                 "Usage: %s [--range <lo> <hi>] [--no-flip] [--scale <factor>] [key ...]\n"
+                 "Usage: %s [--range <lo> <hi>] [--no-flip] [--scale <factor>] [--save-dir <dir>] [key ...]\n"
                  "       %s --stop\n"
                  "  Default: monitor all shared memory keys 0x8100-0x81ff.\n"
                  "  A window opens for each segment carrying RDB images and closes when it disappears.\n"
                  "  --stop  stop the running instance (also when it runs in the background) and exit\n"
                  "  Only one instance runs at a time: starting it again stops the running one first.\n"
-                 "Keys:  q/ESC quit, f toggle vertical flip, s save current frames as PNG\n",
+                 "  --save-dir  where the Save button / 's' key write PNG files (default: current directory)\n"
+                 "Click 'Save' (bottom-right of a window) to save that window's current frame at full\n"
+                 "resolution without overlays.\n"
+                 "Keys:  q/ESC quit, f toggle vertical flip, s save the current frame of every window\n",
                  prog, prog);
 }
 
@@ -451,6 +547,8 @@ int main(int argc, char** argv)
             return SingleInstance::stopRunning("ShmRgbViewer");
         } else if (a == "--no-flip") {
             opt.flip = false;
+        } else if (a == "--save-dir" && i + 1 < argc) {
+            opt.saveDir = argv[++i];
         } else if (a == "--scale" && i + 1 < argc) {
             opt.displayScale = std::atof(argv[++i]);
         } else if (a == "--range" && i + 2 < argc) {
@@ -509,7 +607,7 @@ int main(int argc, char** argv)
             for (const auto& seg : segments) {
                 if (!wanted(seg.first) || viewers.count(seg.first))
                     continue;
-                std::unique_ptr<Viewer> v(new Viewer(seg.first, seg.second));
+                std::unique_ptr<Viewer> v(new Viewer(seg.first, seg.second, opt));
                 if (v->attach())
                     viewers[seg.first] = std::move(v);
             }
@@ -518,6 +616,7 @@ int main(int argc, char** argv)
         bool anyWindow = false;
         for (auto& kv : viewers) {
             kv.second->update(opt);
+            kv.second->refreshOverlay();
             anyWindow = anyWindow || kv.second->windowOpen();
         }
 
