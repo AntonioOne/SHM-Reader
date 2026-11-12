@@ -8,6 +8,7 @@ Real-time, strictly read-only viewer for VTD RDB image shared memory.
 - Attaches with `SHM_RDONLY`: buffer flags (LOCK / TC / IG) are never modified. Locked buffers are
   skipped and torn copies are discarded.
 - Standalone: does not depend on VTD headers or libraries (see `rdb_shm.h`).
+- Single instance; `--stop` stops a running instance (see below).
 
 ## Build
 
@@ -28,6 +29,13 @@ cmake --build build
 ```
 
 Keys: `q`/`ESC` quit, `f` toggle vertical flip, `s` save current frames as PNG.
+
+### Starting and stopping
+
+- Stop: `q`/`ESC` in a window, Ctrl+C in the terminal, or `./build/ShmRgbViewer --stop`
+  (works when it runs in the background; use `sudo` if it was started as root).
+- Only one instance runs at a time (lock file `/tmp/ShmRgbViewer.lock`): starting it again stops
+  the running instance first. An instance owned by another user is reported instead.
 A window closed by hand reopens with the next new frame; use `q` to quit.
 
 ## VTD side

@@ -9,6 +9,6 @@ endif()
 
 find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs highgui)
 
-add_executable(ShmRgbViewer main.cpp)
+add_executable(ShmRgbViewer main.cpp single_instance.cpp)
 target_include_directories(ShmRgbViewer PRIVATE ${OpenCV_INCLUDE_DIRS})
 target_link_libraries(ShmRgbViewer PRIVATE ${OpenCV_LIBS})

@@ -10,6 +10,7 @@
 // Usage: ShmRgbViewer [--range <lo> <hi>] [--no-flip] [--scale <factor>] [key ...]
 //        Without explicit keys, all keys in the range are monitored.
 // Keys:  q/ESC quit, f toggle vertical flip, s save current frames as PNG
+// Only one instance runs at a time (starting again stops the running one); --stop stops it.
 
 #include <sys/ipc.h>
 #include <sys/shm.h>
@@ -36,6 +37,7 @@
 #include <vector>
 
 #include "rdb_shm.h"
+#include "single_instance.h"
 
 namespace {
 
@@ -414,10 +416,13 @@ void usage(const char* prog)
 {
     std::fprintf(stderr,
                  "Usage: %s [--range <lo> <hi>] [--no-flip] [--scale <factor>] [key ...]\n"
+                 "       %s --stop\n"
                  "  Default: monitor all shared memory keys 0x8100-0x81ff.\n"
                  "  A window opens for each segment carrying RDB images and closes when it disappears.\n"
+                 "  --stop  stop the running instance (also when it runs in the background) and exit\n"
+                 "  Only one instance runs at a time: starting it again stops the running one first.\n"
                  "Keys:  q/ESC quit, f toggle vertical flip, s save current frames as PNG\n",
-                 prog);
+                 prog, prog);
 }
 
 bool parseKey(const char* s, long& out)
@@ -442,6 +447,8 @@ int main(int argc, char** argv)
         if (a == "-h" || a == "--help") {
             usage(argv[0]);
             return 0;
+        } else if (a == "--stop") {
+            return SingleInstance::stopRunning("ShmRgbViewer");
         } else if (a == "--no-flip") {
             opt.flip = false;
         } else if (a == "--scale" && i + 1 < argc) {
@@ -468,6 +475,11 @@ int main(int argc, char** argv)
 
     std::signal(SIGINT, [](int) { gStop = true; });
     std::signal(SIGTERM, [](int) { gStop = true; });
+    std::signal(SIGHUP, [](int) { gStop = true; });
+
+    SingleInstance instance("ShmRgbViewer");
+    if (!instance.acquire())
+        return 1;
 
     if (explicitKeys.empty())
         std::fprintf(stderr, "Monitoring shared memory keys %s-%s ...\n", hexKey(rangeLo).c_str(),
